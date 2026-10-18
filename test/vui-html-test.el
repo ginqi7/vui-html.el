@@ -170,6 +170,16 @@
     (expect (vui-html "<unknown>hello</unknown>")
             :to-equal (vui-text "hello")))
 
+  (it "wraps text inside a generic container to `vui-html-max-width'"
+    (let* ((text (mapconcat (lambda (_) "这是一个很长的中文句子")
+                            (number-sequence 1 20) ""))
+           (lines (split-string
+                   (vui-html-test--render (format "<div><span>%s</span></div>" text))
+                   "\n")))
+      (expect (> (length lines) 1) :to-be-truthy)
+      (dolist (line lines)
+        (expect (<= (length line) vui-html-max-width) :to-be-truthy))))
+
   (it "ignores comments and <script>/<style> content"
     (expect (vui-html "<!-- a comment --><p>hello</p>")
             :to-equal (vui-text "hello"))

@@ -378,16 +378,20 @@ Standalone anchors are rendered as buttons rather than as inline text."
                (eq (car-safe (car nodes)) 'a))
       (car nodes))))
 
-(defun vui-html--translate-block-children (children)
+(defun vui-html--translate-block-children (children &optional width indent)
   "Translate CHILDREN into a list of block-level vnodes.
-Consecutive inline nodes are merged into one `vui-text' vnode."
+Consecutive inline nodes are merged into one `vui-text' vnode.
+When WIDTH is non-nil, merged text is wrapped to WIDTH columns and
+continuation lines are indented by INDENT."
   (if-let* ((anchor (vui-html--sole-anchor children)))
       (let ((node (vui-html--translate-node anchor)))
         (if node (list node) nil))
-    (vui-html--translate-block-children-1 children)))
+    (vui-html--translate-block-children-1 children width indent)))
 
-(defun vui-html--translate-block-children-1 (children)
-  "Translate CHILDREN, merging consecutive inline nodes into text."
+(defun vui-html--translate-block-children-1 (children &optional width indent)
+  "Translate CHILDREN, merging consecutive inline nodes into text.
+WIDTH and INDENT are passed to `vui-html--wrap-text' when WIDTH is
+non-nil."
   (let ((result nil)
         (inline "")
         (break-p nil))
@@ -395,7 +399,11 @@ Consecutive inline nodes are merged into one `vui-text' vnode."
         ((flush ()
            (let ((text (vui-html--collapse-whitespace inline)))
              (cond
-              ((not (string-empty-p text)) (push (vui-text text) result))
+              ((not (string-empty-p text))
+               (push (if width
+                         (vui-html--wrap-text (vui-text text) width (or indent 0))
+                       (vui-text text))
+                     result))
               (break-p (push (vui-newline) result))))
            (setq inline "" break-p nil)))
       (dolist (child children)
@@ -411,8 +419,11 @@ Consecutive inline nodes are merged into one `vui-text' vnode."
     (nreverse result)))
 
 (defun vui-html--translate-container (children)
-  "Translate CHILDREN as a block container."
-  (vui-html--compose-block (vui-html--translate-block-children children)))
+  "Translate CHILDREN as a block container.
+Inline text is wrapped to `vui-html-max-width', so that documents that
+use <div> instead of <p> for body text honour the configured width."
+  (vui-html--compose-block
+   (vui-html--translate-block-children children vui-html-max-width)))
 
 (defun vui-html--indent-text-lines (text indent)
   "Prefix every line of TEXT except the first with INDENT spaces."
@@ -450,9 +461,8 @@ ORDERED selects numbered markers; START is the first number."
               ;; lines are aligned under the item's text.
               (indent (1+ (length marker)))
               (width (max 1 (- vui-html-max-width indent)))
-              (nodes (vui-html--translate-block-children (cddr item))))
-         (when (car nodes)
-           (setcar nodes (vui-html--wrap-text (car nodes) width indent)))
+              (nodes (vui-html--translate-block-children
+                      (cddr item) width indent)))
          (if (cdr nodes)
              ;; Inline content followed by nested blocks (usually a
              ;; nested list): keep the marker on the first line and
@@ -472,7 +482,8 @@ ORDERED selects numbered markers; START is the first number."
                nodes))
         ('dd
          (push (vui-html--compose-block
-                (vui-html--translate-block-children (cddr child))
+                (vui-html--translate-block-children
+                 (cddr child) (max 1 (- vui-html-max-width 2)) 2)
                 :indent 2)
                nodes))))
     (vui-html--compose-block (nreverse nodes))))
@@ -652,7 +663,8 @@ ORDERED selects numbered markers; START is the first number."
     ((eq tag 'blockquote)
      (apply #'vui-vstack
             (append (list :indent 2 :face 'vui-muted)
-                    (vui-html--translate-block-children children))))
+                    (vui-html--translate-block-children
+                     children (max 1 (- vui-html-max-width 2)) 2))))
     ((eq tag 'pre)
      (let* ((code (vui-html--raw-text children))
             ;; Browsers drop a single newline directly after <pre>.
@@ -680,7 +692,8 @@ ORDERED selects numbered markers; START is the first number."
      (vui-strong (vui-html--render-inline-string children)))
     ((eq tag 'dd)
      (vui-html--compose-block
-      (vui-html--translate-block-children children)
+      (vui-html--translate-block-children
+       children (max 1 (- vui-html-max-width 2)) 2)
       :indent 2))
 
    ;; Tables
