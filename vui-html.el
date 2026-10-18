@@ -39,6 +39,8 @@
 (require 'vui+)
 (require 'seq)
 (require 'subr-x)
+(require 'cl-lib)
+(require 'face-remap)
 (require 'ekp)
 
 (defgroup vui-html nil
@@ -54,6 +56,25 @@
 (defcustom vui-html-max-width 80
   "Maximum character width for rendering HTML content."
   :type 'integer
+  :group 'vui-html)
+
+(defcustom vui-html-font nil
+  "Font used to display rendered HTML.
+The value is one of:
+
+- nil, to use the default face's font;
+- a font family name (a string);
+- a font spec or font object;
+- a plist of face attributes, for example
+  \(:family \"Noto Serif CJK SC\" :height 140).  `:size' is also
+  accepted, in points, and is converted to `:height'.
+
+The font is applied to the text rendered by `vui-html-mount', and is
+in effect while translating and measuring the HTML as well, so that
+line breaking matches the font used for display."
+  :type '(choice (const :tag "Default font" nil)
+                 (string :tag "Font family")
+                 (plist :key-type symbol :value-type sexp))
   :group 'vui-html)
 
 (defcustom vui-html-table-border :unicode
@@ -772,16 +793,101 @@ for rendering via `vui-mount'."
 
 (vui-defcomponent vui-html (node) :render node)
 
+(defun vui-html--font-attributes (font)
+  "Return FONT as a plist of face attributes.
+FONT is a font family name, a font spec or font object, or a plist
+of face attributes.  In the plist, `:size' is accepted in points and
+converted to the absolute `:height' that faces use."
+  (cond
+   ((null font) nil)
+   ((stringp font) (list :family font))
+   ((fontp font) (list :font font))
+   ((listp font)
+    (let (attrs)
+      (while font
+        (let ((key (pop font))
+              (value (pop font)))
+          (when (eq key :size)
+            (setq key :height
+                  value (round (* value 10))))
+          (push key attrs)
+          (push value attrs)))
+      (nreverse attrs)))
+   (t (error "Invalid font specification: %S" font))))
+
+(defmacro with-default-font (font &rest body)
+  "Execute BODY with the `default' face's font set to FONT.
+FONT is a font family name (a string), a font spec, or a plist of
+face attributes accepted by `set-face-attribute', for example
+\(:family \"Noto Serif CJK SC\" :height 140).  `:size' is accepted
+in the plist as a point size and converted to `:height'.
+
+The original attributes are restored when BODY finishes or signals.
+`after-setting-font-hook' is run on both changes, so glyph-metric
+caches (vui, ekp, ...) are invalidated and text is laid out with the
+font that is actually in effect."
+  (declare (indent 1) (debug (form body)))
+  (let ((attrs (make-symbol "attrs"))
+        (saved (make-symbol "saved")))
+    `(let* ((,attrs (vui-html--font-attributes ,font))
+            (,saved
+             (cl-loop for (key _value) on ,attrs by #'cddr
+                      collect (cons key (face-attribute 'default key)))))
+       (unwind-protect
+           (progn
+             (apply #'set-face-attribute 'default nil ,attrs)
+             (run-hooks 'after-setting-font-hook)
+             ,@body)
+         (dolist (entry ,saved)
+           (set-face-attribute 'default nil (car entry) (cdr entry)))
+         (run-hooks 'after-setting-font-hook)))))
+
+(defvar-local vui-html--font-remap nil
+  "Cookie for this buffer's `vui-html-font' face remapping.")
+
+(defun vui-html--set-buffer-font (buffer font)
+  "Display BUFFER's text with FONT.
+FONT has the same forms as `vui-html-font'.  It is installed as a
+buffer-local remapping of the `default' face rather than as a
+`face' text property: `vui-mount' re-renders the whole buffer
+whenever its window changes width, which erases text properties.
+The remapping applies to text whose faces leave an attribute
+unspecified, while faces that specify it themselves (such as
+`vui-code', which inherits `fixed-pitch') keep it."
+  (with-current-buffer buffer
+    (when vui-html--font-remap
+      (face-remap-remove-relative vui-html--font-remap))
+    (setq vui-html--font-remap
+          (face-remap-add-relative
+           'default (vui-html--font-attributes font)))))
+
 (defun vui-html-mount (&optional html)
   "Render HTML string in `vui-html-buffer-name'.
 When HTML is nil, use the contents of the current buffer.
+When `vui-html-font' is non-nil, use it for measuring and displaying
+the rendered text.
 Returns the buffer if successful, nil otherwise."
   (interactive)
   (unless html
     (setq html (buffer-string)))
-  (vui-mount
-   (vui-component 'vui-html :node (vui-html html))
-   vui-html-buffer-name))
+  (let (result
+        (mount (lambda ()
+                 (vui-mount
+                  (vui-component 'vui-html :node (vui-html html))
+                  vui-html-buffer-name))))
+    ;; Pixel widths used for line breaking are measured from the
+    ;; frame's default face, so translate and mount with the custom
+    ;; font in effect.
+    (setq result (if vui-html-font
+                     (with-default-font vui-html-font (funcall mount))
+                   (funcall mount)))
+    ;; `with-default-font' restores the global default face after
+    ;; mounting; remap the buffer's `default' face so that the page
+    ;; keeps displaying the font (and keeps it across re-renders).
+    (when vui-html-font
+      (vui-html--set-buffer-font
+       (get-buffer-create vui-html-buffer-name) vui-html-font))
+    result))
 
 (provide 'vui-html)
 ;;; vui-html.el ends here

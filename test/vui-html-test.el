@@ -427,7 +427,81 @@
                     (substring-no-properties (buffer-string)))
                   :to-equal "mounted"))
       (when (get-buffer vui-html-buffer-name)
-        (kill-buffer vui-html-buffer-name)))))
+        (kill-buffer vui-html-buffer-name))))
+
+  (it "applies `vui-html-font' to the rendered page"
+    (let ((vui-html-font "TestFont"))
+      (unwind-protect
+          (progn
+            (vui-html-mount "<p>mounted <code>code</code></p>")
+            (with-current-buffer vui-html-buffer-name
+              (expect (assq 'default face-remapping-alist)
+                      :to-equal '(default (:family "TestFont") default))))
+        (when (get-buffer vui-html-buffer-name)
+          (kill-buffer vui-html-buffer-name)))))
+
+  (it "applies family and size from a `vui-html-font' plist"
+    (let ((vui-html-font '(:family "TestFont" :size 16)))
+      (unwind-protect
+          (progn
+            (vui-html-mount "<p>mounted</p>")
+            (with-current-buffer vui-html-buffer-name
+              (expect (assq 'default face-remapping-alist)
+                      :to-equal
+                      '(default (:family "TestFont" :height 160) default))))
+        (when (get-buffer vui-html-buffer-name)
+          (kill-buffer vui-html-buffer-name)))))
+
+  (it "keeps the font remapping after a re-render"
+    (let ((vui-html-font "TestFont"))
+      (unwind-protect
+          (progn
+            (vui-html-mount "<p>mounted</p>")
+            (with-current-buffer vui-html-buffer-name
+              (vui-rerender vui--root-instance)
+              (expect (assq 'default face-remapping-alist)
+                      :to-equal '(default (:family "TestFont") default))))
+        (when (get-buffer vui-html-buffer-name)
+          (kill-buffer vui-html-buffer-name))))))
+
+;;; With-default-font
+
+(describe "with-default-font"
+  (it "sets the default face family for the dynamic extent of BODY"
+    (let (inside)
+      (with-default-font "TestFont"
+        (setq inside (face-attribute 'default :family)))
+      (expect inside :to-equal "TestFont")
+      (expect (face-attribute 'default :family) :not :to-equal "TestFont")))
+
+  (it "restores the default face when BODY signals"
+    (let ((original (face-attribute 'default :family)))
+      (ignore-errors
+        (with-default-font "TestFont"
+          (error "boom")))
+      (expect (face-attribute 'default :family) :to-equal original)))
+
+  (it "accepts a plist of face attributes"
+    (with-default-font '(:family "TestFont" :weight bold)
+      (expect (face-attribute 'default :family) :to-equal "TestFont")
+      (expect (face-attribute 'default :weight) :to-equal 'bold)))
+
+  (it "converts :size to an absolute :height"
+    (with-default-font '(:family "TestFont" :size 16)
+      (expect (face-attribute 'default :height) :to-equal 160))))
+
+(describe "vui-html--font-attributes"
+  (it "accepts a family name"
+    (expect (vui-html--font-attributes "TestFont")
+            :to-equal '(:family "TestFont")))
+
+  (it "converts :size in a plist to :height"
+    (expect (vui-html--font-attributes '(:family "TestFont" :size 12.5 :weight bold))
+            :to-equal '(:family "TestFont" :height 125 :weight bold)))
+
+  (it "keeps an absolute or relative :height as is"
+    (expect (vui-html--font-attributes '(:height 1.2))
+            :to-equal '(:height 1.2))))
 
 (provide 'vui-html-test)
 ;;; vui-html-test.el ends here
