@@ -70,6 +70,11 @@ When nil, `vui+-source-code' tries to detect the language itself."
   :type '(choice (const :tag "Auto-detect" nil) string)
   :group 'vui-html)
 
+(defcustom vui-html-browse-url #'browse-url
+  ""
+  :type 'function
+  :group 'vui-html)
+
 ;;; Tag classification
 
 (defconst vui-html--ignored-tags
@@ -94,23 +99,6 @@ Returns a parse tree suitable for translation."
   (with-temp-buffer
     (insert html-string)
     (libxml-parse-html-region (point-min) (point-max))))
-
-(defun vui-html--node-tag (node)
-  "Get the tag name from a parsed HTML NODE.
-Returns the symbol (e.g., div, p) if NODE is a cons cell, nil otherwise."
-  (when (consp node)
-    (car node)))
-
-(defun vui-html--node-attrs (node)
-  "Get the attribute alist from a parsed HTML NODE.
-Returns an association list of attributes if NODE is a cons cell, nil otherwise."
-  (when (consp node)
-    (cadr node)))
-
-(defun vui-html--node-children (node)
-  "Get the children of NODE as a list."
-  (when (consp node)
-    (cddr node)))
 
 (defun vui-html--attr-p (attrs name)
   "Return non-nil when boolean attribute NAME is present in ATTRS."
@@ -189,11 +177,11 @@ Existing properties, including faces, are preserved."
 ;;; Inline rendering
 
 (defun vui-html--link-keymap (url)
-  "Return a keymap that opens URL with `browse-url'."
+  "Return a keymap that opens URL with `vui-html-browse-url'."
   (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "RET") (lambda () (interactive) (browse-url url)))
-    (define-key map [mouse-1] (lambda () (interactive) (browse-url url)))
-    (define-key map [mouse-2] (lambda () (interactive) (browse-url url)))
+    (define-key map (kbd "RET") (lambda () (interactive) (funcall vui-html-browse-url url)))
+    (define-key map [mouse-1] (lambda () (interactive) (funcall vui-html-browse-url url)))
+    (define-key map [mouse-2] (lambda () (interactive) (funcall vui-html-browse-url url)))
     map))
 
 (defun vui-html--render-inline-nodes (nodes &optional face)
@@ -221,12 +209,15 @@ tooltip and activation keymap are added."
          (title (alist-get 'title attrs))
          (child-face (if href (vui-html--merge-faces face '(link)) face))
          (text (vui-html--render-inline-nodes children child-face)))
-    (if href
-        (vui-html--add-text-properties
-         text (list 'help-echo (or title href)
-                    'mouse-face 'highlight
-                    'keymap (vui-html--link-keymap href)))
-      text)))
+    (vui-html--add-target-id
+     (if href
+         (vui-html--add-text-properties
+          text (list 'help-echo (or title href)
+                     'mouse-face 'highlight
+                     'shr-url href
+                     'keymap (vui-html--link-keymap href)))
+       text)
+     (alist-get 'id attrs))))
 
 (defun vui-html--render-inline-control (tag attrs children face)
   "Render form control TAG with ATTRS and CHILDREN as inline text.
@@ -268,6 +259,66 @@ FACE is applied to the resulting placeholder."
      (format "[%s%s]" tag (if title (format ": %s" title) ""))
      face)))
 
+(defconst vui-html--target-id-marker "​"
+  "Zero-width character used to anchor an ID on an otherwise empty element.")
+
+(defun vui-html--add-target-id (result id)
+  "Attach `shr-target-id' text property ID to RESULT.
+RESULT is a string or a vnode.  Container vnodes are descended
+into so the property lands on the first rendered text.  Empty
+elements receive a zero-width marker, since an empty string cannot
+carry text properties."
+  (if (not id)
+      result
+    (cond
+     ((stringp result)
+      (if (string-empty-p result)
+          (propertize vui-html--target-id-marker 'shr-target-id id)
+        (vui-html--add-text-properties result (list 'shr-target-id id))))
+     ((vui-vnode-text-p result)
+      (let ((content (vui-vnode-text-content result)))
+        (vui-vnode-text--create
+         :content (if (and (stringp content) (string-empty-p content))
+                      vui-html--target-id-marker
+                    content)
+         :face (vui-vnode-text-face result)
+         :key (vui-vnode-text-key result)
+         :properties (append (vui-vnode-text-properties result)
+                             (list 'shr-target-id id)))))
+     ((vui-vnode-button-p result)
+      (setf (vui-vnode-button-label result)
+            (vui-html--add-target-id (vui-vnode-button-label result) id))
+      result)
+     ((vui-vnode-box-p result)
+      (setf (vui-vnode-box-child result)
+            (vui-html--add-target-id (vui-vnode-box-child result) id))
+      result)
+     ((vui-vnode-region-p result)
+      (when-let* ((children (vui-vnode-region-children result)))
+        (setf (vui-vnode-region-children result)
+              (cons (vui-html--add-target-id (car children) id)
+                    (cdr children))))
+      result)
+     ((vui-vnode-fragment-p result)
+      (when-let* ((children (vui-vnode-fragment-children result)))
+        (setf (vui-vnode-fragment-children result)
+              (cons (vui-html--add-target-id (car children) id)
+                    (cdr children))))
+      result)
+     ((vui-vnode-vstack-p result)
+      (when-let* ((children (vui-vnode-vstack-children result)))
+        (setf (vui-vnode-vstack-children result)
+              (cons (vui-html--add-target-id (car children) id)
+                    (cdr children))))
+      result)
+     ((vui-vnode-hstack-p result)
+      (when-let* ((children (vui-vnode-hstack-children result)))
+        (setf (vui-vnode-hstack-children result)
+              (cons (vui-html--add-target-id (car children) id)
+                    (cdr children))))
+      result)
+     (t result))))
+
 (defun vui-html--render-inline (node &optional face)
   "Render NODE as propertized inline text, layering FACE beneath markup faces."
   (cond
@@ -298,8 +349,9 @@ FACE is applied to the resulting placeholder."
          (let ((result (vui-html--render-inline-nodes children child-face))
                (title (alist-get 'title attrs)))
            (if (and title (memq tag '(abbr dfn time)))
-               (vui-html--add-text-properties result (list 'help-echo title))
-             result))))))))
+               (setq result (vui-html--add-text-properties
+                             result (list 'help-echo title))))
+           (vui-html--add-target-id result (alist-get 'id attrs)))))))))
 
 ;;; Block rendering
 
@@ -362,6 +414,25 @@ Consecutive inline nodes are merged into one `vui-text' vnode."
   "Translate CHILDREN as a block container."
   (vui-html--compose-block (vui-html--translate-block-children children)))
 
+(defun vui-html--indent-text-lines (text indent)
+  "Prefix every line of TEXT except the first with INDENT spaces."
+  (if (or (<= indent 0) (not (string-match-p "\n" text)))
+      text
+    (replace-regexp-in-string
+     "\n" (concat "\n" (make-string indent ?\s)) text t t)))
+
+(defun vui-html--wrap-text (node width indent)
+  "Wrap text NODE to WIDTH columns, indenting continuation lines by INDENT.
+Return NODE unchanged when it is not a text vnode."
+  (if (not (vui-vnode-text-p node))
+      node
+    (let* ((wrapped (vui+-kp-text node width))
+           (content (vui-vnode-text-content wrapped)))
+      (when (stringp content)
+        (setf (vui-vnode-text-content wrapped)
+              (vui-html--indent-text-lines content indent)))
+      wrapped)))
+
 (defun vui-html--translate-list (children &optional ordered start)
   "Translate list CHILDREN into a `vui-list'.
 ORDERED selects numbered markers; START is the first number."
@@ -375,7 +446,13 @@ ORDERED selects numbered markers; START is the first number."
                           (prog1 (format "%d." number)
                             (setq number (1+ number)))
                         "•"))
+              ;; The marker is followed by one space, and continuation
+              ;; lines are aligned under the item's text.
+              (indent (1+ (length marker)))
+              (width (max 1 (- vui-html-max-width indent)))
               (nodes (vui-html--translate-block-children (cddr item))))
+         (when (car nodes)
+           (setcar nodes (vui-html--wrap-text (car nodes) width indent)))
          (if (cdr nodes)
              ;; Inline content followed by nested blocks (usually a
              ;; nested list): keep the marker on the first line and
@@ -545,138 +622,132 @@ ORDERED selects numbered markers; START is the first number."
 ;;; HTML to VUI Translation
 
 (defun vui-html--translate-node (node)
-  "Translate single HTML NODE to a vui component or nil."
-  (cond
-   ((stringp node)
-    (let ((text (vui-html--collapse-whitespace node)))
-      (unless (string-empty-p text)
-        (vui-text text))))
-   ((not (consp node)) nil)
-   (t
-    (let ((tag (car node)))
-      (unless (memq tag vui-html--ignored-tags)
-        (vui-html--translate-element tag (cadr node) (cddr node)))))))
+  "Translate block-level parsed HTML NODE to a vui component or nil."
+  (let ((tag (car node)))
+    (unless (memq tag vui-html--ignored-tags)
+      (vui-html--translate-element tag (cadr node) (cddr node)))))
 
 (defun vui-html--translate-element (tag attrs children)
   "Translate HTML element with TAG, ATTRS and CHILDREN to a vui component."
-  (cond
-   ;; Document structure and generic block containers
-   ((memq tag '(html body top div section article main header footer nav
-                     aside address figure center hgroup search))
-    (vui-html--translate-container children))
+  (vui-html--add-target-id
+   (cond
+    ;; Document structure and generic block containers
+    ((memq tag '(html body top div section article main header footer nav
+                      aside address figure center hgroup search))
+     (vui-html--translate-container children))
 
    ;; Paragraphs and headings
-   ((eq tag 'p)
-    (vui+-kp-text (vui-html--render-inline-string children)
-                  vui-html-max-width))
-   ((memq tag '(h1 h2 h3 h4 h5 h6 h7 h8))
-    (let ((level (string-to-number (substring (symbol-name tag) 1))))
-      (vui-heading (vui-html--render-inline-string children)
-                   :level level)))
+    ((eq tag 'p)
+     (vui+-kp-text (vui-html--render-inline-string children)
+                   vui-html-max-width))
+    ((memq tag '(h1 h2 h3 h4 h5 h6 h7 h8))
+     (let ((level (string-to-number (substring (symbol-name tag) 1))))
+       (vui-heading (vui-html--render-inline-string children)
+                    :level level)))
 
    ;; Line and block separators
-   ((eq tag 'br) (vui-newline))
-   ((eq tag 'hr) (vui-text (make-string vui-html-max-width ?─)))
+    ((eq tag 'hr) (vui-text (make-string vui-html-max-width ?─)))
 
    ;; Quoted and preformatted blocks
-   ((eq tag 'blockquote)
-    (apply #'vui-vstack
-           (append (list :indent 2 :face 'vui-muted)
-                   (vui-html--translate-block-children children))))
-   ((eq tag 'pre)
-    (let* ((code (vui-html--raw-text children))
-           ;; Browsers drop a single newline directly after <pre>.
-           (code (if (string-prefix-p "\n" code)
-                     (substring code 1)
-                   code)))
-      (vui+-source-code code (vui-html--pre-language attrs children))))
+    ((eq tag 'blockquote)
+     (apply #'vui-vstack
+            (append (list :indent 2 :face 'vui-muted)
+                    (vui-html--translate-block-children children))))
+    ((eq tag 'pre)
+     (let* ((code (vui-html--raw-text children))
+            ;; Browsers drop a single newline directly after <pre>.
+            (code (if (string-prefix-p "\n" code)
+                      (substring code 1)
+                    code)))
+       (vui+-source-code code (vui-html--pre-language attrs children))))
 
    ;; Lists
-   ((eq tag 'ul)
-    (vui-html--translate-list children))
-   ((eq tag 'menu)
-    (vui-html--translate-list children))
-   ((eq tag 'ol)
-    (let ((start (alist-get 'start attrs)))
-      (vui-html--translate-list
-       children t (and (stringp start)
-                       (string-match-p "\\`[0-9]+\\'" start)
-                       (string-to-number start)))))
-   ((eq tag 'li)
-    (vui-html--compose-block
-     (vui-html--translate-block-children children)))
-   ((eq tag 'dl) (vui-html--translate-dl children))
-   ((eq tag 'dt)
-    (vui-strong (vui-html--render-inline-string children)))
-   ((eq tag 'dd)
-    (vui-html--compose-block
-     (vui-html--translate-block-children children)
-     :indent 2))
+    ((eq tag 'ul)
+     (vui-html--translate-list children))
+    ((eq tag 'menu)
+     (vui-html--translate-list children))
+    ((eq tag 'ol)
+     (let ((start (alist-get 'start attrs)))
+       (vui-html--translate-list
+        children t (and (stringp start)
+                        (string-match-p "\\`[0-9]+\\'" start)
+                        (string-to-number start)))))
+    ((eq tag 'li)
+     (vui-html--compose-block
+      (vui-html--translate-block-children children)))
+    ((eq tag 'dl) (vui-html--translate-dl children))
+    ((eq tag 'dt)
+     (vui-strong (vui-html--render-inline-string children)))
+    ((eq tag 'dd)
+     (vui-html--compose-block
+      (vui-html--translate-block-children children)
+      :indent 2))
 
    ;; Tables
-   ((eq tag 'table) (vui-html--translate-table children))
-   ((or (eq tag 'thead) (eq tag 'tbody) (eq tag 'tfoot)
-        (eq tag 'tr) (eq tag 'th) (eq tag 'td))
-    (vui-html--translate-container children))
-   ((eq tag 'caption)
-    (vui-muted (vui-html--render-inline-string children)))
+    ((eq tag 'table) (vui-html--translate-table children))
+    ((or (eq tag 'thead) (eq tag 'tbody) (eq tag 'tfoot)
+         (eq tag 'tr) (eq tag 'th) (eq tag 'td))
+     (vui-html--translate-container children))
+    ((eq tag 'caption)
+     (vui-muted (vui-html--render-inline-string children)))
 
    ;; Links and media
-   ((eq tag 'a)
-    (let ((href (alist-get 'href attrs))
-          (label (vui-html--render-inline-string children)))
-      (if href
-          (vui-button (if (string-empty-p label) href label)
-            :on-click (lambda () (browse-url href)))
-        (vui-text label))))
-   ((eq tag 'img)
-    (let ((src (alist-get 'src attrs))
-          (alt (or (alist-get 'alt attrs)
-                   (alist-get 'title attrs))))
-      (if src
-          (vui-button (format "[image: %s]" (or alt src))
-            :no-decoration t
-            :on-click (lambda () (browse-url src)))
-        (vui-text (format "[image: %s]" (or alt "unknown"))))))
-   ((memq tag '(audio video iframe embed object))
-    (let ((src (or (alist-get 'src attrs) (alist-get 'data attrs)))
-          (title (or (alist-get 'title attrs) (alist-get 'alt attrs))))
-      (vui-button (format "[%s%s]" tag (if title (format ": %s" title) ""))
-        :no-decoration t
-        :on-click (when src (lambda () (browse-url src))))))
+    ((eq tag 'a)
+     (let ((href (alist-get 'href attrs))
+           (label (vui-html--render-inline-string children)))
+       (if href
+           (vui-button (vui-html--add-text-properties
+                        (if (string-empty-p label) href label)
+                        (list 'shr-url href))
+             :on-click (lambda () (funcall vui-html-browse-url href)))
+         (vui-text label))))
+    ((eq tag 'img)
+     (let ((src (alist-get 'src attrs))
+           (alt (or (alist-get 'alt attrs)
+                    (alist-get 'title attrs))))
+       (if src
+           (vui-button (vui-html--add-text-properties
+                        (format "[image: %s]" (or alt src))
+                        (list 'shr-url src))
+             :no-decoration t
+             :on-click (lambda () (funcall vui-html-browse-url src)))
+         (vui-text (format "[image: %s]" (or alt "unknown"))))))
+    ((memq tag '(audio video iframe embed object))
+     (let ((src (or (alist-get 'src attrs) (alist-get 'data attrs)))
+           (title (or (alist-get 'title attrs) (alist-get 'alt attrs))))
+       (vui-button (vui-html--add-text-properties
+                    (format "[%s%s]" tag (if title (format ": %s" title) ""))
+                    (when src (list 'shr-url src)))
+         :no-decoration t
+         :on-click (when src (lambda () (funcall vui-html-browse-url src))))))
 
    ;; Forms
-   ((eq tag 'form) (vui-html--translate-container children))
-   ((eq tag 'fieldset) (vui-html--translate-container children))
-   ((eq tag 'legend)
-    (vui-strong (vui-html--render-inline-string children)))
-   ((eq tag 'label)
-    (vui-text (vui-html--render-inline-string children)))
-   ((eq tag 'input) (vui-html--translate-input attrs))
-   ((eq tag 'textarea)
-    (vui-field :value (vui-html--raw-text children) :size 40))
-   ((eq tag 'select) (vui-html--translate-select children attrs))
-   ((eq tag 'button)
-    (vui-button (vui-html--render-inline-string children)))
-   ((eq tag 'output)
-    (vui-text (vui-html--render-inline-string children)))
-   ((memq tag '(progress meter))
-    (vui-text (format "%s %s" tag (or (alist-get 'value attrs) ""))))
+    ((eq tag 'form) (vui-html--translate-container children))
+    ((eq tag 'fieldset) (vui-html--translate-container children))
+    ((eq tag 'legend)
+     (vui-strong (vui-html--render-inline-string children)))
+    ((eq tag 'input) (vui-html--translate-input attrs))
+    ((eq tag 'textarea)
+     (vui-field :value (vui-html--raw-text children) :size 40))
+    ((eq tag 'select) (vui-html--translate-select children attrs))
+    ((eq tag 'button)
+     (vui-button (vui-html--render-inline-string children)))
+    ((eq tag 'output)
+     (vui-text (vui-html--render-inline-string children)))
+    ((memq tag '(progress meter))
+     (vui-text (format "%s %s" tag (or (alist-get 'value attrs) ""))))
 
    ;; Disclosure and captions
-   ((eq tag 'details) (vui-html--translate-details attrs children))
-   ((eq tag 'summary)
-    (vui-strong (vui-html--render-inline-string children)))
-   ((eq tag 'figcaption)
-    (vui-muted (vui-html--render-inline-string children)))
-   ((eq tag 'dialog) (vui-html--translate-container children))
-
-   ;; Text-level elements when translated outside inline flow
-   ((memq tag vui-html--inline-tags)
-    (vui-text (vui-html--render-inline (cons tag (cons attrs children)))))
+    ((eq tag 'details) (vui-html--translate-details attrs children))
+    ((eq tag 'summary)
+     (vui-strong (vui-html--render-inline-string children)))
+    ((eq tag 'figcaption)
+     (vui-muted (vui-html--render-inline-string children)))
+    ((eq tag 'dialog) (vui-html--translate-container children))
 
    ;; Unknown elements - treat as a block container
-   (t (vui-html--translate-container children))))
+    (t (vui-html--translate-container children)))
+   (alist-get 'id attrs)))
 
 ;;; Main API
 
