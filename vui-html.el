@@ -125,6 +125,17 @@ Returns a parse tree suitable for translation."
   "Return non-nil when boolean attribute NAME is present in ATTRS."
   (and (assq name attrs) t))
 
+(defun vui-html--attr-number (attrs name)
+  "Return decimal integer attribute NAME of ATTRS as a number."
+  (when-let* ((value (alist-get name attrs)))
+    (and (stringp value)
+         (string-match-p "\\`[0-9]+\\'" value)
+         (string-to-number value))))
+
+(defun vui-html--input-type (attrs)
+  "Return the normalized type of an `<input>' with ATTRS."
+  (downcase (or (alist-get 'type attrs) "text")))
+
 (defun vui-html--normalize-text (text)
   "Collapse runs of whitespace in TEXT to a single space."
   (replace-regexp-in-string "[ \t\r\n\f]+" " " text))
@@ -182,27 +193,25 @@ Leading and trailing whitespace is removed."
 
 (defun vui-html--propertize (string face)
   "Return STRING propertized with FACE, when non-nil."
-  (if (or (null face) (string-empty-p string))
-      string
-    (propertize string 'face face)))
+  (if face
+      (propertize string 'face face)
+    string))
 
 (defun vui-html--add-text-properties (string props)
   "Return a copy of STRING with text PROPS added.
 Existing properties, including faces, are preserved."
-  (if (string-empty-p string)
-      string
-    (let ((result (copy-sequence string)))
-      (add-text-properties 0 (length result) props result)
-      result)))
+  (let ((result (copy-sequence string)))
+    (add-text-properties 0 (length result) props result)
+    result))
 
 ;;; Inline rendering
 
 (defun vui-html--link-keymap (url)
   "Return a keymap that opens URL with `vui-html-browse-url'."
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "RET") (lambda () (interactive) (funcall vui-html-browse-url url)))
-    (define-key map [mouse-1] (lambda () (interactive) (funcall vui-html-browse-url url)))
-    (define-key map [mouse-2] (lambda () (interactive) (funcall vui-html-browse-url url)))
+  (let ((map (make-sparse-keymap))
+        (open (lambda () (interactive) (funcall vui-html-browse-url url))))
+    (dolist (key (list (kbd "RET") [mouse-1] [mouse-2]))
+      (define-key map key open))
     map))
 
 (defun vui-html--render-inline-nodes (nodes &optional face)
@@ -245,7 +254,7 @@ tooltip and activation keymap are added."
 FACE is applied to the resulting placeholder."
   (pcase tag
     ('input
-     (let ((type (downcase (or (alist-get 'type attrs) "text"))))
+     (let ((type (vui-html--input-type attrs)))
        (vui-html--propertize
         (pcase type
           ((or "hidden" "image") "")
@@ -283,6 +292,12 @@ FACE is applied to the resulting placeholder."
 (defconst vui-html--target-id-marker "​"
   "Zero-width character used to anchor an ID on an otherwise empty element.")
 
+(defun vui-html--prepend-target-id (children id)
+  "Attach `shr-target-id' ID to the first of CHILDREN.
+CHILDREN is a list of vnodes; the list is returned with its first
+element updated."
+  (cons (vui-html--add-target-id (car children) id) (cdr children)))
+
 (defun vui-html--add-target-id (result id)
   "Attach `shr-target-id' text property ID to RESULT.
 RESULT is a string or a vnode.  Container vnodes are descended
@@ -317,26 +332,22 @@ carry text properties."
      ((vui-vnode-region-p result)
       (when-let* ((children (vui-vnode-region-children result)))
         (setf (vui-vnode-region-children result)
-              (cons (vui-html--add-target-id (car children) id)
-                    (cdr children))))
+              (vui-html--prepend-target-id children id)))
       result)
      ((vui-vnode-fragment-p result)
       (when-let* ((children (vui-vnode-fragment-children result)))
         (setf (vui-vnode-fragment-children result)
-              (cons (vui-html--add-target-id (car children) id)
-                    (cdr children))))
+              (vui-html--prepend-target-id children id)))
       result)
      ((vui-vnode-vstack-p result)
       (when-let* ((children (vui-vnode-vstack-children result)))
         (setf (vui-vnode-vstack-children result)
-              (cons (vui-html--add-target-id (car children) id)
-                    (cdr children))))
+              (vui-html--prepend-target-id children id)))
       result)
      ((vui-vnode-hstack-p result)
       (when-let* ((children (vui-vnode-hstack-children result)))
         (setf (vui-vnode-hstack-children result)
-              (cons (vui-html--add-target-id (car children) id)
-                    (cdr children))))
+              (vui-html--prepend-target-id children id)))
       result)
      (t result))))
 
@@ -362,10 +373,7 @@ carry text properties."
         ((or 'input 'button 'select 'textarea)
          (vui-html--render-inline-control tag attrs children child-face))
         ('q (concat "“" (vui-html--render-inline-nodes children child-face) "”"))
-        ((or 'script 'style 'head 'title 'meta 'link 'base 'template 'noscript
-             'source 'track 'param 'col 'colgroup 'datalist 'map 'area
-             'option 'optgroup)
-         "")
+        ((pred (lambda (tag) (memq tag vui-html--ignored-tags))) "")
         (_
          (let ((result (vui-html--render-inline-nodes children child-face))
                (title (alist-get 'title attrs)))
@@ -405,8 +413,8 @@ Consecutive inline nodes are merged into one `vui-text' vnode.
 When WIDTH is non-nil, merged text is wrapped to WIDTH columns and
 continuation lines are indented by INDENT."
   (if-let* ((anchor (vui-html--sole-anchor children)))
-      (let ((node (vui-html--translate-node anchor)))
-        (if node (list node) nil))
+      (when-let* ((node (vui-html--translate-node anchor)))
+        (list node))
     (vui-html--translate-block-children-1 children width indent)))
 
 (defun vui-html--translate-block-children-1 (children &optional width indent)
@@ -594,15 +602,11 @@ ORDERED selects numbered markers; START is the first number."
 
 (defun vui-html--translate-input (attrs)
   "Translate an `<input>' with ATTRS into a form component."
-  (let* ((type (downcase (or (alist-get 'type attrs) "text")))
+  (let* ((type (vui-html--input-type attrs))
          (value (alist-get 'value attrs))
          (placeholder (alist-get 'placeholder attrs))
          (name (or (alist-get 'name attrs) (alist-get 'id attrs)))
-         (size-attr (alist-get 'size attrs))
-         (size (if (and (stringp size-attr)
-                        (string-match-p "\\`[0-9]+\\'" size-attr))
-                   (string-to-number size-attr)
-                 30)))
+         (size (or (vui-html--attr-number attrs 'size) 30)))
     (pcase type
       ((or "hidden" "image") nil)
       ((or "checkbox" "radio")
@@ -647,9 +651,9 @@ ORDERED selects numbered markers; START is the first number."
                     (vui-html--render-inline-string (cddr summary))
                   "Details")))
     (apply #'vui-collapsible
-           (append (list :title title
-                         :initially-expanded (vui-html--attr-p attrs 'open))
-                   (vui-html--translate-block-children body)))))
+           :title title
+           :initially-expanded (vui-html--attr-p attrs 'open)
+           (vui-html--translate-block-children body))))
 
 ;;; HTML to VUI Translation
 
@@ -665,7 +669,8 @@ ORDERED selects numbered markers; START is the first number."
    (cond
     ;; Document structure and generic block containers
     ((memq tag '(html body top div section article main header footer nav
-                      aside address figure center hgroup search))
+                      aside address figure center hgroup search
+                      form fieldset dialog))
      (vui-html--translate-container children))
 
    ;; Paragraphs and headings
@@ -682,10 +687,9 @@ ORDERED selects numbered markers; START is the first number."
 
    ;; Quoted and preformatted blocks
     ((eq tag 'blockquote)
-     (apply #'vui-vstack
-            (append (list :indent 2 :face 'vui-muted)
-                    (vui-html--translate-block-children
-                     children (max 1 (- vui-html-max-width 2)) 2))))
+     (apply #'vui-vstack :indent 2 :face 'vui-muted
+            (vui-html--translate-block-children
+             children (max 1 (- vui-html-max-width 2)) 2)))
     ((eq tag 'pre)
      (let* ((code (vui-html--raw-text children))
             ;; Browsers drop a single newline directly after <pre>.
@@ -695,16 +699,11 @@ ORDERED selects numbered markers; START is the first number."
        (vui+-source-code code (vui-html--pre-language attrs children))))
 
    ;; Lists
-    ((eq tag 'ul)
-     (vui-html--translate-list children))
-    ((eq tag 'menu)
+    ((memq tag '(ul menu))
      (vui-html--translate-list children))
     ((eq tag 'ol)
-     (let ((start (alist-get 'start attrs)))
-       (vui-html--translate-list
-        children t (and (stringp start)
-                        (string-match-p "\\`[0-9]+\\'" start)
-                        (string-to-number start)))))
+     (vui-html--translate-list
+      children t (vui-html--attr-number attrs 'start)))
     ((eq tag 'li)
      (vui-html--compose-block
       (vui-html--translate-block-children children)))
@@ -719,8 +718,7 @@ ORDERED selects numbered markers; START is the first number."
 
    ;; Tables
     ((eq tag 'table) (vui-html--translate-table children))
-    ((or (eq tag 'thead) (eq tag 'tbody) (eq tag 'tfoot)
-         (eq tag 'tr) (eq tag 'th) (eq tag 'td))
+    ((memq tag '(thead tbody tfoot tr th td))
      (vui-html--translate-container children))
     ((eq tag 'caption)
      (vui-muted (vui-html--render-inline-string children)))
@@ -756,8 +754,6 @@ ORDERED selects numbered markers; START is the first number."
          :on-click (when src (lambda () (funcall vui-html-browse-url src))))))
 
    ;; Forms
-    ((eq tag 'form) (vui-html--translate-container children))
-    ((eq tag 'fieldset) (vui-html--translate-container children))
     ((eq tag 'legend)
      (vui-strong (vui-html--render-inline-string children)))
     ((eq tag 'input) (vui-html--translate-input attrs))
@@ -777,7 +773,6 @@ ORDERED selects numbered markers; START is the first number."
      (vui-strong (vui-html--render-inline-string children)))
     ((eq tag 'figcaption)
      (vui-muted (vui-html--render-inline-string children)))
-    ((eq tag 'dialog) (vui-html--translate-container children))
 
    ;; Unknown elements - treat as a block container
     (t (vui-html--translate-container children)))
@@ -803,16 +798,10 @@ converted to the absolute `:height' that faces use."
    ((stringp font) (list :family font))
    ((fontp font) (list :font font))
    ((listp font)
-    (let (attrs)
-      (while font
-        (let ((key (pop font))
-              (value (pop font)))
-          (when (eq key :size)
-            (setq key :height
-                  value (round (* value 10))))
-          (push key attrs)
-          (push value attrs)))
-      (nreverse attrs)))
+    (cl-loop for (key value) on font by #'cddr
+             append (if (eq key :size)
+                        (list :height (round (* value 10)))
+                      (list key value))))
    (t (error "Invalid font specification: %S" font))))
 
 (defmacro with-default-font (font &rest body)
